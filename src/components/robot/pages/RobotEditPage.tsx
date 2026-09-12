@@ -18,7 +18,7 @@ import {
   Divider,
 } from "@mui/material";
 import { Visibility, VisibilityOff } from "@mui/icons-material";
-import { useGlobalInfoStore } from "../../../context/globalInfo";
+import { useGlobalInfoStore, useCacheInvalidation } from "../../../context/globalInfo";
 import { getStoredRecording, updateRecording, replaceDocumentFile } from "../../../api/storage";
 import { WhereWhatPair } from "maxun-core";
 import { RobotConfigPage } from "./RobotConfigPage";
@@ -228,6 +228,7 @@ export const RobotEditPage = ({ handleStart }: RobotSettingsProps) => {
   const location = useLocation();
   const [credentials, setCredentials] = useState<Credentials>({});
   const { recordingId, notify, setRerenderRobots } = useGlobalInfoStore();
+  const { invalidateRecordings } = useCacheInvalidation();
   const [robot, setRobot] = useState<RobotSettings | null>(null);
   const [credentialGroups, setCredentialGroups] = useState<GroupedCredentials>({
     passwords: [],
@@ -1296,7 +1297,7 @@ export const RobotEditPage = ({ handleStart }: RobotSettingsProps) => {
           <input
             id="doc-replace-input"
             type="file"
-            accept="application/pdf,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx"
+            accept=".pdf,.docx,.csv,.xlsx,.jpg,.jpeg,.png,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/jpeg,image/png"
             style={{ display: 'none' }}
             onChange={(e) => setReplacementFile(e.target.files?.[0] || null)}
           />
@@ -1306,7 +1307,7 @@ export const RobotEditPage = ({ handleStart }: RobotSettingsProps) => {
             </Typography>
           ) : (
             <>
-              <Typography variant="body2" fontWeight={500}>Click to upload a new PDF or DOCX</Typography>
+              <Typography variant="body2" fontWeight={500}>Click to upload a new PDF, DOCX, XLSX, CSV, JPG, or PNG</Typography>
               <Typography variant="caption" color="text.secondary">Max file size: 10 MB</Typography>
             </>
           )}
@@ -1604,6 +1605,7 @@ export const RobotEditPage = ({ handleStart }: RobotSettingsProps) => {
       const success = await updateRecording(robot.recording_meta.id, payload);
 
       if (success) {
+        invalidateRecordings();
         setRerenderRobots(true);
         notify("success", t("robot_edit.notifications.update_success"));
         handleStart(robot);

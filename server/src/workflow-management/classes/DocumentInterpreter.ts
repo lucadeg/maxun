@@ -8,7 +8,9 @@ import type { PaddleOcrResult } from 'ppu-paddle-ocr';
 import logger from '../../logger';
 import { OutputFormats } from '../../constants/output-formats';
 import { parseMarkdown } from '../../markdownify/markdown';
-import { DOCX_MIME_TYPE, PDF_MIME_TYPE, XLSX_MIME_TYPE, CSV_MIME_TYPE } from '../../utils/document/documentFile';
+import { DOCX_MIME_TYPE, PDF_MIME_TYPE, XLSX_MIME_TYPE, CSV_MIME_TYPE, 
+  PNG_MIME_TYPE, isImageMimeType } from '../../utils/document/documentFile';
+import { assertLlmBaseUrlAllowed, resolveOpenAiApiKey } from '../../utils/llm-endpoint';
 
 import * as XLSX from 'xlsx';
 
@@ -51,6 +53,8 @@ interface ParsedDocument {
   pages: ParsedPage[];
   tables: string[][][];
   sourceHtml?: string;
+  /** True when the document came from a flat image, which has no page structure. */
+  isImage?: boolean;
 }
 
 interface ExtractionResult {
@@ -79,6 +83,14 @@ const normalizeWhitespace = (value: string): string =>
 
 const cleanText = (value: string): string =>
   normalizeWhitespace(value.replace(/\x00/g, ''));
+
+const escapeHtml = (value: string): string =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
 const OCR_ASCII_NOISE_THRESHOLD = 0.80;
 
@@ -187,7 +199,29 @@ const buildCleanTextFromOCRData = (data: any): string => {
   return resultLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 };
 
+const MAX_OCR_PIXELS = 25_000_000; // ~25 MP, 5000x5000 pixels
+
+const downscaleIfOversized = async (imagePath: string): Promise<void> => {
+  const sharp = (await import('sharp')).default;
+  const meta = await sharp(imagePath).metadata();
+  const pixelCount = (meta.width || 0) * (meta.height || 0);
+  if (pixelCount <= MAX_OCR_PIXELS) return;
+
+  const scale = Math.sqrt(MAX_OCR_PIXELS / pixelCount);
+  const isPng = meta.format === 'png';
+  const tmp = `${imagePath}.resized.${isPng ? 'png' : 'jpg'}`;
+  const resized = sharp(imagePath).resize(
+    Math.max(1, Math.floor(meta.width! * scale)),
+    Math.max(1, Math.floor(meta.height! * scale))
+  );
+  await (isPng ? resized.png() : resized.jpeg()).toFile(tmp);
+  await fs.promises.rename(tmp, imagePath);
+  logger.info(`[DocumentInterpreter] Downscaled ${meta.width}×${meta.height} image to fit OCR pixel budget`);
+};
+
 const preprocessPageImage = async (imagePath: string): Promise<void> => {
+  await downscaleIfOversized(imagePath);
+
   try {
     const { createCanvas, loadImage } = await import('canvas');
     const img = await loadImage(imagePath);
@@ -848,6 +882,8 @@ class DocumentLLMClient {
     config: LLMConfig
   ): Promise<ProviderResult> {
     const baseUrl = config.baseUrl || process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+    await assertLlmBaseUrlAllowed(baseUrl);
+
     const model = config.model || process.env.OLLAMA_DEFAULT_MODEL || 'llama3.2:latest';
 
     const controller = new AbortController();
@@ -857,6 +893,7 @@ class DocumentLLMClient {
       const response = await fetch(`${baseUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        redirect: 'error',
         signal: controller.signal,
         body: JSON.stringify({
           model,
@@ -891,10 +928,11 @@ class DocumentLLMClient {
     userPrompt: string,
     config: LLMConfig
   ): Promise<ProviderResult> {
-    const apiKey = config.apiKey || process.env.OPENAI_API_KEY;
-    if (!apiKey) throw new Error('OpenAI API key not configured');
+    const apiKey = resolveOpenAiApiKey(config.apiKey, config.baseUrl);
+    if (!apiKey && !config.baseUrl) throw new Error('OpenAI API key not configured');
 
     const baseUrl = config.baseUrl || 'https://api.openai.com/v1';
+    await assertLlmBaseUrlAllowed(baseUrl);
     const model = config.model || 'gpt-4o-mini';
 
     const requestOpenAI = async (useJsonMode: boolean): Promise<Response> => {
@@ -918,6 +956,7 @@ class DocumentLLMClient {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
+        redirect: 'error',
         body: JSON.stringify(body),
       });
     };
@@ -1409,6 +1448,83 @@ export class DocumentInterpreter {
     };
   }
 
+  private static async parseImage(buffer: Buffer, documentMimeType: string): Promise<ParsedDocument> {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'maxun-img-'));
+    const tempFile = path.join(tmpDir, documentMimeType === PNG_MIME_TYPE ? 'image.png' : 'image.jpg');
+
+    try {
+      await fs.promises.writeFile(tempFile, buffer);
+      await downscaleIfOversized(tempFile);
+
+      let script = 'Latin';
+      try {
+        script = await this.detectScript(tempFile);
+      } catch (detectErr: any) {
+        logger.warn(`[DocumentInterpreter] Script detection failed (${detectErr.message}), defaulting to Latin`);
+      }
+      logger.info(`[DocumentInterpreter] OCR on uploaded image (mimeType: ${documentMimeType}) script: ${script}`);
+
+      let text = '';
+      let tables: string[][][] = [];
+      let paddleSucceeded = false;
+
+      try {
+        const { lines } = await PaddleOCRProvider.recognizePage(tempFile, script);
+        tables = extractTablesFromPaddleLines([lines]);
+        text = cleanText(reconstructTextFromPaddleLines(lines));
+        // Treat an empty PaddleOCR result as a failure, not a success.
+        if (text) {          
+          paddleSucceeded = true;
+        }
+      } catch (paddleErr: any) {
+        logger.warn(`[DocumentInterpreter] PaddleOCR failed (${paddleErr.message}), falling back to Tesseract`);
+      }
+
+      if (!paddleSucceeded) {
+        try {
+          text = cleanText(await this.ocrImageWithTesseract(tempFile, script));
+        } catch (tesseractErr: any) {
+          logger.error(`[DocumentInterpreter] Tesseract also failed on image (${tesseractErr.message})`);
+          throw new Error('Could not read the image. The file may be corrupt, truncated, or an unsupported image variant.');
+        }
+      }
+
+      const pages: ParsedPage[] = [{ pageNumber: 1, text }];
+      logger.info(`[DocumentInterpreter] OCR complete — ${text.length} chars from image (mimeType: ${documentMimeType})`);
+      return { text, pageCount: 1, pages, tables, isImage: true };
+    } finally {
+      fs.rmSync(tmpDir, { force: true, recursive: true });
+    }
+  }
+
+  private static async ocrImageWithTesseract(imagePath: string, script: string): Promise<string> {
+    const langs = (this.SCRIPT_TO_LANGS[script] || ['eng']).join('+');
+    const { createWorker } = await import('tesseract.js');
+    let worker: any;
+    try {
+      worker = await createWorker(langs, 1, {
+        cachePath: process.env.TESSERACT_CACHE_PATH || '/tmp/tesseract-cache',
+        logger: () => {},
+      } as any);
+    } catch {
+      worker = await createWorker('eng', 1, {
+        cachePath: process.env.TESSERACT_CACHE_PATH || '/tmp/tesseract-cache',
+        logger: () => {},
+      } as any);
+    }
+    try {
+      await worker.setParameters({
+        tessedit_pageseg_mode: '3',
+        preserve_interword_spaces: '1',
+      });
+      await preprocessPageImage(imagePath);
+      const { data } = await worker.recognize(imagePath);
+      return buildCleanTextFromOCRData(data);
+    } finally {
+      await worker.terminate();
+    }
+  }
+
   private static buildSchemaPrompt(
     prompt: string,
     sampleText: string
@@ -1547,6 +1663,9 @@ export class DocumentInterpreter {
     if (documentMimeType === CSV_MIME_TYPE) {
       return this.parseCSV(buffer);
     }
+    if (isImageMimeType(documentMimeType)) {
+      return this.parseImage(buffer, documentMimeType);
+    }
     return this.parsePDF(buffer);
   }
 
@@ -1565,7 +1684,7 @@ export class DocumentInterpreter {
     let providerLabel = 'heuristic-fallback';
 
     for (const chunk of chunks) {
-      if (!chunk.text.trim()) continue;
+      if (!chunk.text.trim() && parsedDocument.tables.length === 0) continue;
 
       const { systemPrompt, userPrompt } = this.buildExtractionPrompt(
         prompt,
@@ -1607,7 +1726,7 @@ export class DocumentInterpreter {
     for (const page of doc.pages) {
       const text = cleanText(page.text);
       if (!text) continue;
-      parts.push(`## Page ${page.pageNumber}\n\n${text}`);
+      parts.push(doc.isImage ? text : `## Page ${page.pageNumber}\n\n${text}`);
     }
 
     for (let i = 0; i < doc.tables.length; i++) {
@@ -1634,20 +1753,22 @@ export class DocumentInterpreter {
       if (!text) continue;
       const paragraphs = text
         .split(/\n{2,}/)
-        .map((p) => `<p>${p.replace(/\n/g, '<br>')}</p>`)
+        .map((p) => `<p>${escapeHtml(p).replace(/\n/g, '<br>')}</p>`)
         .join('\n');
-      parts.push(
-        `<section data-page="${page.pageNumber}">\n<h2>Page ${page.pageNumber}</h2>\n${paragraphs}\n</section>`
-      );
+        parts.push(
+          doc.isImage
+            ? paragraphs
+            : `<section data-page="${page.pageNumber}">\n<h2>Page ${page.pageNumber}</h2>\n${paragraphs}\n</section>`
+        );
     }
 
     for (let i = 0; i < doc.tables.length; i++) {
       const table = doc.tables[i];
       if (table.length === 0) continue;
-      const header = `<thead><tr>${table[0].map((cell) => `<th>${cell.trim()}</th>`).join('')}</tr></thead>`;
+      const header = `<thead><tr>${table[0].map((cell) => `<th>${escapeHtml(cell.trim())}</th>`).join('')}</tr></thead>`;
       const body = `<tbody>${table
         .slice(1)
-        .map((row) => `<tr>${row.map((cell) => `<td>${cell.trim()}</td>`).join('')}</tr>`)
+        .map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell.trim())}</td>`).join('')}</tr>`)
         .join('\n')}</tbody>`;
       parts.push(`<table>\n${header}\n${body}\n</table>`);
     }
@@ -1657,7 +1778,11 @@ export class DocumentInterpreter {
   }
 
   private static extractLinks(text: string, sourceHtml?: string): string[] {
-    const urlPattern = /https?:\/\/[^\s<>"')\]]+/g;
+    // An image carries no link annotations, so the only links available are URLs that
+    // appear as visible text — and those are usually written without a scheme. Match
+    // three shapes: full http(s) URLs, "www."-prefixed hosts, and bare domains with a
+    // recognizable TLD. The last two get "https://" prepended so the output is usable.
+    const urlPattern = /(?<![@\w.-])(?:(?:https?:\/\/|www\.)[^\s<>"')\]]+|(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|app|co|edu|gov|us|info)\b(?!\.[a-z])(?:\/[^\s<>"')\]]*)?)/gi;
     const raw = text.match(urlPattern) || [];
     const htmlLinks = sourceHtml
       ? Array.from(sourceHtml.matchAll(/href\s*=\s*["']([^"']+)["']/gi))
@@ -1666,7 +1791,10 @@ export class DocumentInterpreter {
       : [];
 
     return [...new Set([
-      ...raw.map((url) => url.replace(/[.,;:!?]+$/, '')),
+      ...raw.map((match) => {
+        const url = match.replace(/[.,;:!?]+$/, '');
+        return /^https?:\/\//i.test(url) ? url : `https://${url}`;
+      }),
       ...htmlLinks,
     ])];
   }
