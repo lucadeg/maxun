@@ -16,6 +16,7 @@ import { cancelScheduledWorkflow, scheduleWorkflow } from '../storage/schedule';
 import { addJob } from '../storage/graphileWorker';
 import { QUEUE_NAMES } from '../task-runner';
 import { io as serverIo, recentRecoveries } from '../server';
+import { checkAiExtractInput } from '../sdk/aiExtract/target';
 import { WorkflowEnricher } from '../sdk/workflowEnricher';
 import sequelizeInstance from '../storage/db';
 import { Op, literal } from 'sequelize';
@@ -33,7 +34,7 @@ import { createDocumentParseRobotRecord } from '../utils/document/createDocument
 import { normalizeRobotUrl, normalizeWorkflowUrls, applyWorkflowLimits } from '../utils/robot-updates';
 import { normalizeDocumentMimeType } from '../utils/document/documentFile';
 import { validateRequiredLlmConfig, formatsRequireLlm, readLlmConfig } from '../utils/llm-config-validation';
-import { findPreviousSuccessfulRun } from '../utils/run-comparison';
+import { findPreviousSuccessfulRun, serializeCapturedText } from '../utils/run-comparison';
 
 export const router = Router();
 
@@ -761,36 +762,22 @@ router.post('/recordings/scrape', requireSignIn, async (req: AuthenticatedReques
 });
 
 /**
- * POST endpoint for creating an LLM-powered extraction robot
- * URL is optional - if not provided, the system will search for the target website based on the prompt
+ * POST endpoint for creating an AI Extract robot.
+ * Both the page URL and the prompt are required: the robot extracts what the
+ * prompt asks for from that page only.
  */
 router.post('/recordings/llm', requireSignIn, async (req: AuthenticatedRequest, res) => {
   try {
     const { url, prompt, llmProvider, llmModel, llmApiKey, llmBaseUrl, robotName } = req.body;
 
-    if (!prompt) {
-      return res.status(400).json({ error: 'The "prompt" field is required.' });
+    const input = checkAiExtractInput(url, prompt);
+    if (!input.ok) {
+      return res.status(400).json({ error: input.error });
     }
-
-    const trimmedPrompt = (prompt as string).trim();
-    if (trimmedPrompt.length < 15) {
-      return res.status(400).json({ error: 'Extraction prompt is too short. Please describe what you want to extract (e.g., "Extract company names and descriptions from the YC companies page").' });
-    }
-    if (/field_\d+/i.test(trimmedPrompt)) {
-      return res.status(400).json({ error: 'Extraction prompt looks like a template placeholder. Please replace it with a specific description of what you want to extract.' });
-    }
+    const { url: targetUrl, prompt: trimmedPrompt } = input;
 
     if (!req.user) {
       return res.status(401).send({ error: 'Unauthorized' });
-    }
-
-    // Validate URL format if provided
-    if (url) {
-      try {
-        normalizeRobotUrl(url);
-      } catch (err) {
-        return res.status(400).json({ error: 'Invalid URL format' });
-      }
     }
 
     const finalRobotName = (typeof robotName === 'string' ? robotName.trim() : '') || `LLM Extract: ${prompt.substring(0, 50)}`;
@@ -823,8 +810,9 @@ router.post('/recordings/llm', requireSignIn, async (req: AuthenticatedRequest, 
         pairs: 0,
         params: [],
         type: 'extract',
-        url: url || '',
+        url: targetUrl,
         isLLM: true,
+        prompt: trimmedPrompt,
         status: 'creating',
       },
       recording: { workflow: [] },
@@ -838,39 +826,15 @@ router.post('/recordings/llm', requireSignIn, async (req: AuthenticatedRequest, 
 
     logger.log('info', `LLM robot stub created with id: ${stubRobot.id}, starting workflow generation`);
 
-    let workflowResult: any;
-    let finalUrl: string;
-
     try {
-      if (url) {
-        logger.log('info', `Starting LLM workflow generation for provided URL: ${url}`);
-        workflowResult = await WorkflowEnricher.generateWorkflowFromPrompt(url, prompt, req.user.id, llmConfig);
-        finalUrl = workflowResult.url || url;
-      } else if (await WorkflowEnricher.isMultiSitePrompt(prompt, llmConfig)) {
-        logger.log('info', `Auto-detected multi-site prompt, starting multi-site workflow generation: "${prompt}"`);
-        workflowResult = await WorkflowEnricher.generateMultiSiteWorkflowFromSearch(prompt, req.user.id, llmConfig);
-        finalUrl = workflowResult.url || '';
-        if (finalUrl) {
-          logger.log('info', `Multi-site workflow primary URL: ${finalUrl}`);
-        }
-      } else {
-        logger.log('info', `Starting LLM workflow generation with automatic URL detection for prompt: "${prompt}"`);
-        workflowResult = await WorkflowEnricher.generateWorkflowFromPromptWithSearch(prompt, req.user.id, llmConfig);
-        finalUrl = workflowResult.url || '';
-        if (finalUrl) {
-          logger.log('info', `Auto-detected URL: ${finalUrl}`);
-        }
-      }
-
-      if (finalUrl) {
-        finalUrl = normalizeRobotUrl(finalUrl);
-      }
+      logger.log('info', `Starting AI Extract for ${targetUrl}`);
+      const workflowResult = await WorkflowEnricher.generateWorkflowFromPrompt(targetUrl, trimmedPrompt, req.user.id, llmConfig);
 
       if (!workflowResult.success || !workflowResult.workflow) {
         logger.log('error', `Failed to generate workflow: ${JSON.stringify(workflowResult.errors)}`);
         await stubRobot.destroy();
-        return res.status(400).json({
-          error: 'Failed to generate workflow from prompt',
+        return res.status(422).json({
+          error: workflowResult.errors?.[0] || 'Failed to generate workflow from prompt',
           details: workflowResult.errors
         });
       }
@@ -881,9 +845,11 @@ router.post('/recordings/llm', requireSignIn, async (req: AuthenticatedRequest, 
         recording_meta: {
           ...stubRobot.recording_meta,
           pairs: normalizedWorkflow.length,
-          url: finalUrl,
+          url: targetUrl,
           updatedAt: new Date().toISOString(),
           status: 'ready',
+          // Spec, sample rows and fields not found on the page.
+          ...(workflowResult.aiExtract ? { aiExtract: workflowResult.aiExtract } : {}),
         },
         recording: { workflow: normalizedWorkflow },
       });
@@ -891,12 +857,13 @@ router.post('/recordings/llm', requireSignIn, async (req: AuthenticatedRequest, 
       await stubRobot.reload();
 
       logger.log('info', `LLM robot ready with id: ${stubRobot.id}`);
+      // aiExtract holds rows scraped from the page; keep them out of telemetry.
+      const { aiExtract: _aiExtract, ...telemetryMeta } = stubRobot.recording_meta as any;
       capture('maxun-oss-llm-robot-created', {
-        robot_meta: stubRobot.recording_meta,
+        robot_meta: telemetryMeta,
         recording: stubRobot.recording,
         llm_provider: llmProvider || 'ollama',
-        prompt: prompt,
-        urlAutoDetected: !url,
+        prompt: trimmedPrompt,
       });
 
       return res.status(201).json({
@@ -1110,6 +1077,38 @@ router.delete('/runs/:id', requireSignIn, async (req: AuthenticatedRequest, res)
   }
 });
 
+router.delete('/runs/robot/:robotMetaId', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  if (!req.user) {
+    return res.status(401).send({ error: 'Unauthorized' });
+  }
+
+  try {
+    const robot = await Robot.findOne({
+      where: {
+        'recording_meta.id': req.params.robotMetaId,
+        userId: req.user.id,
+      },
+    });
+
+    if (!robot) {
+      return res.status(404).json({ error: 'Robot not found.' });
+    }
+
+    await Run.destroy({
+      where: { robotMetaId: req.params.robotMetaId },
+    });
+
+    return res.send(true);
+  } catch (e) {
+    const { message } = e as Error;
+    logger.log(
+      'error',
+      `Error while deleting runs for robot ${req.params.robotMetaId}: ${message}`,
+    );
+    return res.status(500).send(false);
+  }
+});
+
 /**
  * PUT endpoint for starting a remote browser instance and saving run metadata to the storage.
  * Making it ready for interpretation and returning a runId.
@@ -1281,7 +1280,7 @@ router.get('/runs/run/:id', requireSignIn, async (req, res) => {
   }
 });
 
-// Get endpoint to fetch the text diff between a run and the previous successful run.
+// Get endpoint to fetch text-based output diffs between a run and the previous successful run.
 router.get('/runs/:id/diff', requireSignIn, async (req: AuthenticatedRequest, res) => {
   try {
     if (!req.user) {
@@ -1304,14 +1303,47 @@ router.get('/runs/:id/diff', requireSignIn, async (req: AuthenticatedRequest, re
       return res.status(404).json({ error: 'No previous run to compare against' });
     }
 
-    const currentText = (run.serializableOutput as any)?.text?.[0]?.content || '';
-    const previousText = (previousRun.serializableOutput as any)?.text?.[0]?.content || '';
+    const currentOutput = run.serializableOutput as any;
+    const previousOutput = previousRun.serializableOutput as any;
+    const formats = ['text', 'markdown', 'html'].reduce((result, format) => {
+      const current = currentOutput?.[format]?.[0]?.content;
+      const previous = previousOutput?.[format]?.[0]?.content;
+      if (typeof current === 'string') {
+        result[format] = {
+          current: typeof current === 'string' ? current : '',
+          previous: typeof previous === 'string' ? previous : '',
+        };
+      }
+      return result;
+    }, {} as Record<string, { current: string; previous: string }>);
 
+    const currentText = formats.text?.current || '';
+    const previousText = formats.text?.previous || '';
+    const isExtract = robot.recording_meta.type === 'extract';
+    const currentCapturedText = currentOutput?.scrapeSchema || {};
+    const previousCapturedText = previousOutput?.scrapeSchema || {};
+    const capturedText = isExtract
+      && (Object.keys(currentCapturedText).length > 0 || Object.keys(previousCapturedText).length > 0)
+      ? {
+        current: serializeCapturedText(currentCapturedText),
+        previous: serializeCapturedText(previousCapturedText),
+      }
+      : null;
+    const currentCapturedLists = currentOutput?.scrapeList || {};
+    const previousCapturedLists = previousOutput?.scrapeList || {};
+    const capturedLists = isExtract
+      && (Object.keys(currentCapturedLists).length > 0 || Object.keys(previousCapturedLists).length > 0)
+      ? { current: currentCapturedLists, previous: previousCapturedLists }
+      : null;
     return res.json({
       currentRunId: run.runId,
       previousRunId: previousRun.runId,
       currentText,
       previousText,
+      formats,
+      capturedText,
+      capturedLists,
+      changedFormats: currentOutput?._comparison?.changedFormats || [],
     });
   } catch (e) {
     const { message } = e as Error;

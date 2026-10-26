@@ -26,6 +26,7 @@ import {
 } from '../constants/output-formats';
 import sequelizeInstance from '../storage/db';
 import { Op } from 'sequelize';
+import { checkAiExtractInput } from '../sdk/aiExtract/target';
 import { normalizeRobotUrl, normalizeWorkflowUrls, applyWorkflowLimits } from '../utils/robot-updates';
 import { validateRequiredLlmConfig, formatsRequireLlm, readLlmConfig, toPromptLlmMeta } from '../utils/llm-config-validation';
 import multer from 'multer';
@@ -33,6 +34,15 @@ import { MAX_FILE_SIZE_BYTES } from '../workflow-management/classes/DocumentInte
 import { createDocumentRobotRecord } from '../utils/document/createDocumentRobotRecord';
 import { createDocumentParseRobotRecord } from '../utils/document/createDocumentParseRobotRecord';
 import { normalizeDocumentMimeType, PDF_MIME_TYPE } from '../utils/document/documentFile';
+import { diffLines } from 'diff';
+import {
+    compareExtractRunWithPrevious,
+    compareRunOutputsWithPrevious,
+    findPreviousSuccessfulRun,
+    serializeCapturedLists,
+    serializeCapturedText,
+} from '../utils/run-comparison';
+import { withSnakeCaseCapturedKeys, withSnakeCaseKeys, withSnakeCaseOutput } from "../../../src/helpers/jsonKeys";
 
 const router = Router();
 
@@ -168,6 +178,10 @@ router.post("/sdk/robots", requireAPIKey, async (req: AuthenticatedRequest, res:
         }
 
         const rawFormats = (workflowFile.meta as any).formats;
+        const compareRuns = (workflowFile.meta as any).compareRuns;
+        if (compareRuns !== undefined && typeof compareRuns !== 'boolean') {
+            return res.status(400).json({ error: 'meta.compareRuns must be a boolean' });
+        }
         const { validFormats, invalidFormats } = parseOutputFormats(
             rawFormats,
             type === 'scrape' ? SCRAPE_OUTPUT_FORMAT_OPTIONS : undefined
@@ -207,8 +221,9 @@ router.post("/sdk/robots", requireAPIKey, async (req: AuthenticatedRequest, res:
             const sameFormats = type === 'scrape'
                 ? JSON.stringify([...(meta.formats || [])].sort()) === JSON.stringify([...((workflowFile.meta as any).formats || ['markdown'])].sort())
                 : true;
+            const sameMonitoring = Boolean(meta.compareRuns) === Boolean(compareRuns);
 
-            if (sameType && sameUrl && sameFormats) {
+            if (sameType && sameUrl && sameFormats && sameMonitoring) {
                 return res.status(200).json({
                     data: existingRobot,
                     message: "Existing robot returned",
@@ -250,6 +265,7 @@ router.post("/sdk/robots", requireAPIKey, async (req: AuthenticatedRequest, res:
             type,
             url: extractedUrl,
             formats: normalizedFormats,
+            ...(compareRuns !== undefined ? { compareRuns } : {}),
             isLLM: (workflowFile.meta as any).isLLM,
             ...(promptInstructionsForMeta ? { promptInstructions: promptInstructionsForMeta } : {}),
             ...toPromptLlmMeta(robotLlmConfig, encrypt),
@@ -383,6 +399,9 @@ router.put("/sdk/robots/:id", requireAPIKey, async (req: AuthenticatedRequest, r
         let workflowTouched = Boolean(updates.workflow);
 
         if (updates.meta) {
+            if (updates.meta.compareRuns !== undefined && typeof updates.meta.compareRuns !== 'boolean') {
+                return res.status(400).json({ error: 'meta.compareRuns must be a boolean' });
+            }
             let normalizedMetaUrl: string | undefined;
             if (updates.meta.url) {
                 try {
@@ -658,7 +677,8 @@ router.post("/sdk/robots/:id/execute", requireAPIKey, async (req: AuthenticatedR
 
         logger.info(`[SDK] Starting execution for robot ${robotId}`);
 
-        const runSource = req.headers['x-run-source'] === 'cli' ? 'cli' : 'sdk';
+        const sourceHeader = req.headers['x-run-source'];
+        const runSource = sourceHeader === 'cli' || sourceHeader === 'mcp' ? sourceHeader : 'sdk';
         const promptInstructions = req.body?.promptInstructions;
         const requestedFormats = req.body?.formats as OutputFormats[] | undefined;
         
@@ -667,7 +687,14 @@ router.post("/sdk/robots/:id/execute", requireAPIKey, async (req: AuthenticatedR
             throw new Error('Failed to start robot execution');
         }
 
-        const run = await waitForRunCompletion(runId, user.id.toString());
+        // `wait: false` returns as soon as the run is queued; poll the run for its output.
+        if (req.body?.wait === false) {
+            return res.status(202).json({
+                data: { runId, status: 'running' }
+            });
+        }
+
+        const run = await waitForRunCompletion(runId);
 
         let listData: any[] = [];
         if (run.serializableOutput?.scrapeList) {
@@ -749,9 +776,11 @@ router.post("/sdk/robots/:id/execute", requireAPIKey, async (req: AuthenticatedR
             data: {
                 runId: run.runId,
                 status: run.status,
+                hasChanges: !!run.hasChanges,
+                changedFormats: (run.serializableOutput as any)?._comparison?.changedFormats || [],
                 data: {
-                    textData: run.serializableOutput?.scrapeSchema || {},
-                    listData: listData,
+                    textData: withSnakeCaseCapturedKeys(run.serializableOutput?.scrapeSchema || {}),
+                    listData: withSnakeCaseKeys(listData),
                     crawlData: crawlData,
                     searchData: searchData,
                     text: text,
@@ -827,7 +856,7 @@ router.get("/sdk/robots/:id/runs", requireAPIKey, async (req: AuthenticatedReque
         });
 
         return res.status(200).json({
-            data: runs
+            data: runs.map((run: any) => ({ ...run, serializableOutput: withSnakeCaseOutput(run.serializableOutput) }))
         });
     } catch (error: any) {
         logger.error("[SDK] Error getting runs:", error);
@@ -872,8 +901,9 @@ router.get("/sdk/robots/:id/runs/:runId", requireAPIKey, async (req: Authenticat
             });
         }
 
+        const plainRun: any = run.toJSON();
         return res.status(200).json({
-            data: run
+            data: { ...plainRun, serializableOutput: withSnakeCaseOutput(plainRun.serializableOutput) }
         });
     } catch (error: any) {
         logger.error("[SDK] Error getting run:", error);
@@ -881,6 +911,77 @@ router.get("/sdk/robots/:id/runs/:runId", requireAPIKey, async (req: Authenticat
             error: "Failed to get run",
             message: error.message
         });
+    }
+});
+
+/**
+ * Get the stored monitoring diff for a run.
+ * GET /api/sdk/robots/:id/runs/:runId/diff
+ */
+router.get("/sdk/robots/:id/runs/:runId/diff", requireAPIKey, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const robot = await Robot.findOne({ where: { 'recording_meta.id': req.params.id } });
+        if (!robot) return res.status(404).json({ error: "Robot not found" });
+
+        const run = await Run.findOne({
+            where: { runId: req.params.runId, robotMetaId: robot.recording_meta.id }
+        });
+        if (!run) return res.status(404).json({ error: "Run not found" });
+
+        const previousRun = await findPreviousSuccessfulRun(run);
+        if (!previousRun) {
+            return res.status(200).json({
+                data: { runId: run.runId, previousRunId: null, hasChanges: false, changedFormats: [], diffs: [] }
+            });
+        }
+
+        let changedFormats = ((run.serializableOutput as any)?._comparison?.changedFormats || []) as string[];
+        // Runs completed by older workers may have hasChanges persisted before
+        // their comparison metadata. Recompute it so their diffs remain usable.
+        if (run.hasChanges && changedFormats.length === 0) {
+            const robotType = (robot.recording_meta as any).type || (robot.recording_meta as any).robotType;
+            const comparison = robotType === 'extract'
+                ? await compareExtractRunWithPrevious(run, run.serializableOutput || {})
+                : await compareRunOutputsWithPrevious(run, run.serializableOutput || {});
+            changedFormats = comparison.changedFormats;
+            if (changedFormats.length > 0) {
+                await run.update({
+                    serializableOutput: {
+                        ...(run.serializableOutput || {}),
+                        _comparison: { changedFormats },
+                    },
+                });
+            }
+        }
+        const requestedFormat = typeof req.query.format === 'string' ? req.query.format : undefined;
+        const formats = requestedFormat ? changedFormats.filter((format) => format === requestedFormat) : changedFormats;
+        const content = (output: Record<string, any>, format: string): string => {
+            if (format === 'captured-text') return serializeCapturedText(output?.scrapeSchema);
+            if (format === 'captured-list') return JSON.stringify(JSON.parse(serializeCapturedLists(output?.scrapeList)), null, 2);
+            const value = output?.[format]?.[0]?.content;
+            return typeof value === 'string' ? value : '';
+        };
+
+        const diffs = formats.map((format) => ({
+            format,
+            changes: diffLines(
+                content(previousRun.serializableOutput || {}, format),
+                content(run.serializableOutput || {}, format),
+            ).map(({ value, added, removed }) => ({ value, added: Boolean(added), removed: Boolean(removed) })),
+        }));
+
+        return res.status(200).json({
+            data: {
+                runId: run.runId,
+                previousRunId: previousRun.runId,
+                hasChanges: Boolean(run.hasChanges),
+                changedFormats,
+                diffs,
+            }
+        });
+    } catch (error: any) {
+        logger.error("[SDK] Error getting run monitoring diff:", error);
+        return res.status(500).json({ error: "Failed to get run monitoring diff", message: error.message });
     }
 });
 
@@ -931,7 +1032,10 @@ router.post("/sdk/robots/:id/runs/:runId/abort", requireAPIKey, async (req: Auth
 
         return res.status(200).json({
             message: "Run abortion initiated",
-            data: run
+            data: (() => {
+                const plainRun: any = run.toJSON();
+                return { ...plainRun, serializableOutput: withSnakeCaseOutput(plainRun.serializableOutput) };
+            })()
         });
     } catch (error: any) {
         logger.error("[SDK] Error aborting run:", error);
@@ -1337,20 +1441,24 @@ router.post("/sdk/search", requireAPIKey, async (req: AuthenticatedRequest, res:
 });
 
 /**
- * LLM-based extraction - generate workflow from natural language prompt
+ * AI Extract - generate a robot from a natural language prompt for one page
  * POST /api/sdk/extract/llm
- * URL is optional - if not provided, the system will search for the target website based on the prompt
+ * Both url and prompt are required; the robot extracts from that page only.
  */
 router.post("/sdk/extract/llm", requireAPIKey, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const user = req.user
-        const { url, prompt, llmProvider, llmModel, llmApiKey, llmBaseUrl, robotName } = req.body;
-
-        if (!prompt) {
-            return res.status(400).json({
-                error: "Prompt is required"
-            });
+        const { url, prompt, llmProvider, llmModel, llmApiKey, llmBaseUrl, robotName, compareRuns } = req.body;
+        if (compareRuns !== undefined && typeof compareRuns !== 'boolean') {
+            return res.status(400).json({ error: 'compareRuns must be a boolean' });
         }
+
+        // The SDK has always accepted short prompts; only the URL requirement is new.
+        const input = checkAiExtractInput(url, prompt, { requireDetailedPrompt: false });
+        if (!input.ok) {
+            return res.status(400).json({ error: input.error });
+        }
+        const targetUrl = input.url;
 
         const llmValidationError = validateRequiredLlmConfig(
             readLlmConfig(req.body),
@@ -1360,16 +1468,6 @@ router.post("/sdk/extract/llm", requireAPIKey, async (req: AuthenticatedRequest,
             return res.status(400).json(llmValidationError);
         }
 
-        if (url) {
-            try {
-                normalizeRobotUrl(url);
-            } catch (err) {
-                return res.status(400).json({
-                    error: "Invalid URL format"
-                });
-            }
-        }
-
         const llmConfig = {
             provider: llmProvider,
             model: llmModel,
@@ -1377,20 +1475,12 @@ router.post("/sdk/extract/llm", requireAPIKey, async (req: AuthenticatedRequest,
             baseUrl: llmBaseUrl
         };
 
-        let workflowResult: any;
-        let finalUrl: string;
+        const workflowResult = await WorkflowEnricher.generateWorkflowFromPrompt(targetUrl, input.prompt, user.id, llmConfig);
 
-        if (url) {
-            workflowResult = await WorkflowEnricher.generateWorkflowFromPrompt(url, prompt, user.id, llmConfig);
-            finalUrl = workflowResult.url || url;
-        } else {
-            workflowResult = await WorkflowEnricher.generateWorkflowFromPromptWithSearch(prompt, user.id, llmConfig);
-            finalUrl = workflowResult.url || '';
-        }
-
+        // 400 as before, so existing SDK clients keep handling generation failures the same way.
         if (!workflowResult.success || !workflowResult.workflow) {
             return res.status(400).json({
-                error: "Failed to generate workflow from prompt",
+                error: workflowResult.errors?.[0] || "Failed to generate workflow from prompt",
                 details: workflowResult.errors
             });
         }
@@ -1398,9 +1488,7 @@ router.post("/sdk/extract/llm", requireAPIKey, async (req: AuthenticatedRequest,
         const robotId = uuid();
         const metaId = uuid();
 
-        if (finalUrl) {
-            finalUrl = normalizeRobotUrl(finalUrl);
-        }
+        const finalUrl = targetUrl;
 
         const finalRobotName = robotName || `LLM Extract: ${prompt.substring(0, 50)}`;
 
@@ -1410,7 +1498,7 @@ router.post("/sdk/extract/llm", requireAPIKey, async (req: AuthenticatedRequest,
             const samePrompt = (meta.description || '') === prompt;
             const sameUrl = normalizeUrl(meta.url || '') === normalizeUrl(finalUrl);
 
-            if (samePrompt && sameUrl) {
+            if (samePrompt && sameUrl && Boolean(meta.compareRuns) === Boolean(compareRuns)) {
                 return res.status(200).json({
                     success: true,
                     data: {
@@ -1437,7 +1525,10 @@ router.post("/sdk/extract/llm", requireAPIKey, async (req: AuthenticatedRequest,
             params: [],
             type: 'extract',
             url: finalUrl,
-            isLLM: true
+            ...(compareRuns !== undefined ? { compareRuns } : {}),
+            isLLM: true,
+            // Spec, sample rows and fields not found on the page.
+            ...(workflowResult.aiExtract ? { aiExtract: workflowResult.aiExtract } : {}),
         };
 
         const robot = await Robot.create({
@@ -1451,8 +1542,10 @@ router.post("/sdk/extract/llm", requireAPIKey, async (req: AuthenticatedRequest,
 
         logger.info(`[SDK] Persistent robot created: ${metaId} for LLM extraction`);
 
+        // aiExtract holds rows scraped from the page; keep them out of telemetry.
+        const { aiExtract: _aiExtract, ...telemetryMeta } = robot.recording_meta as any;
         capture("maxun-oss-llm-robot-created", {
-            robot_meta: robot.recording_meta,
+            robot_meta: telemetryMeta,
             recording: robot.recording,
             prompt: prompt
         });

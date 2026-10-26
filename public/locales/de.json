@@ -115,6 +115,7 @@
         "server_url_helper": "Proxy für alle Roboter. HTTP- und SOCKS-Proxys werden unterstützt. Beispiel http://myproxy.com:3128 oder socks5://myproxy.com:3128. Kurzform myproxy.com:3128 wird als HTTP-Proxy behandelt.",
         "requires_auth": "Authentifizierung erforderlich?",
         "username": "Benutzername",
+        "username_hint": "Optional: Fügen Sie {session} dort ein, wo Ihr Anbieter eine Sitzungs-ID erwartet (z. B. user-session-{session}), um für jeden Lauf eine neue Sticky-IP zu erhalten.",
         "password": "Passwort",
         "add_proxy": "Proxy hinzufügen",
         "test_proxy": "Proxy testen",
@@ -465,7 +466,7 @@
         "robot_limit": "Roboter-Limit",
         "created_by_user": "Erstellt von Benutzer",
         "created_at": "Erstellungsdatum des Roboters",
-        "compare_runs": "Compare most recent run to previous run",
+        "compare_runs": "Enable Monitoring",
         "errors": {
             "robot_not_found": "Roboterdetails konnten nicht gefunden werden. Bitte versuchen Sie es erneut."
         },
@@ -651,6 +652,7 @@
         "de": "Deutsch",
         "tr": "Türkisch",
         "ko": "Koreanisch",
-        "he": "Hebräisch"
+        "he": "Hebräisch",
+        "az": "Aserbaidschanisch"
     }
 }

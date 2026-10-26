@@ -19,7 +19,7 @@ import { safeDecrypt } from "../../utils/auth";
 import { getInterpretationFailureReason, hasExpectedRobotOutput } from "../../utils/output-validation";
 import { addJob } from '../../storage/graphileWorker';
 import { QUEUE_NAMES } from '../../task-runner';
-import { compareRunTextWithPrevious } from '../../utils/run-comparison';
+import { compareExtractRunWithPrevious, compareRunOutputsWithPrevious } from '../../utils/run-comparison';
 
 const getRobotTargetUrl = (recording: any): string => {
   const metaUrl = recording?.recording_meta?.url?.trim();
@@ -473,24 +473,30 @@ async function executeRun(id: string, userId: string) {
           }
         }
         
-        await run.update({
-          status: 'success',
-          finishedAt: new Date().toLocaleString(),
+        const [stillRunningCount] = await Run.update({
           log: `${formats.join(', ')} conversion completed successfully`,
-          serializableOutput,
-          binaryOutput,
           hasChanges: false,
+        }, {
+          where: { id: run.id, status: 'running' },
         });
+        if (stillRunningCount === 0) {
+          logger.log('info', `Scheduled run ${plainRun.runId} left running state before results could be finalized`);
+          return false;
+        }
 
         let hasChanges = false;
-        if ((recording.recording_meta as any).compareRuns && serializableOutput.text) {
+        const binaryOutputService = new BinaryOutputService('maxun-run-screenshots');
+        if ((recording.recording_meta as any).compareRuns) {
+          capture('maxun-oss-monitoring-used', { robotType: 'scrape', source: 'scheduled' });
           try {
-            const currentText = serializableOutput.text[0]?.content || '';
-            const comparison = await compareRunTextWithPrevious(run, currentText);
+            const comparison = await compareRunOutputsWithPrevious(run, serializableOutput);
             hasChanges = comparison.hasChanges;
 
-            if (hasChanges && comparison.previousRun) {
-              await run.update({ hasChanges });
+            serializableOutput._comparison = {
+              changedFormats: comparison.changedFormats,
+            };
+
+            if (comparison.previousRun && hasChanges) {
               logger.log('info', `Scheduled run ${plainRun.runId} has changes compared to previous run ${comparison.previousRun.runId}`);
             }
           } catch (compareError: any) {
@@ -500,9 +506,22 @@ async function executeRun(id: string, userId: string) {
 
         let uploadedBinaryOutput: Record<string, string> = {};
         if (Object.keys(binaryOutput).length > 0) {
-          const binaryOutputService = new BinaryOutputService('maxun-run-screenshots');
           uploadedBinaryOutput = await binaryOutputService.uploadAndStoreBinaryOutput(run, binaryOutput);
-          await run.update({ binaryOutput: uploadedBinaryOutput });
+        }
+
+        const finishedAt = new Date().toLocaleString();
+        const [finalizedCount] = await Run.update({
+          status: 'success',
+          finishedAt,
+          hasChanges,
+          serializableOutput: { ...serializableOutput },
+          binaryOutput: uploadedBinaryOutput,
+        }, {
+          where: { id: run.id, status: 'running' },
+        });
+        if (finalizedCount === 0) {
+          logger.log('info', `Scheduled run ${plainRun.runId} left running state while results were being finalized; success was not published`);
+          return false;
         }
 
         logger.log('info', `Markdown robot execution completed for scheduled run ${id}`);
@@ -514,7 +533,7 @@ async function executeRun(id: string, userId: string) {
             robotMetaId: plainRun.robotMetaId,
             robotName: recording.recording_meta.name,
             status: 'success',
-            finishedAt: new Date().toLocaleString(),
+            finishedAt,
             hasChanges,
           };
 
@@ -706,19 +725,43 @@ async function executeRun(id: string, userId: string) {
       }
     }
 
+    const finalSerializableOutput: any = {
+      ...(finalRun?.serializableOutput || {}),
+      crawl: categorizedOutput.crawl,
+      search: categorizedOutput.search,
+    };
+    let hasChanges = false;
     const binaryOutputService = new BinaryOutputService('maxun-run-screenshots');
+    if (robotType === 'extract' && (recording.recording_meta as any).compareRuns) {
+      capture('maxun-oss-monitoring-used', { robotType: 'extract', source: 'scheduled' });
+      const comparison = await compareExtractRunWithPrevious(run, finalSerializableOutput);
+      hasChanges = comparison.hasChanges;
+      finalSerializableOutput._comparison = {
+        changedFormats: comparison.changedFormats,
+      };
+    }
+
     const uploadedBinaryOutput = Object.keys(binaryOutput).length > 0
       ? await binaryOutputService.uploadAndStoreBinaryOutput(run, binaryOutput)
       : {};
 
     await destroyRemoteBrowser(plainRun.browserId, userId);
 
-    await run.update({
+    const finishedAt = new Date().toLocaleString();
+    const [finalizedCount] = await Run.update({
       status: 'success',
-      finishedAt: new Date().toLocaleString(),
+      finishedAt,
       log: interpretationInfo.log.join('\n'),
-      binaryOutput: uploadedBinaryOutput
+      binaryOutput: uploadedBinaryOutput,
+      serializableOutput: finalSerializableOutput,
+      hasChanges,
+    }, {
+      where: { id: run.id, status: 'running' },
     });
+    if (finalizedCount === 0) {
+      logger.log('info', `Scheduled run ${plainRun.runId} left running state while results were being finalized; success was not published`);
+      return false;
+    }
 
     // Get metrics from persisted data for analytics and webhooks
     let totalSchemaItemsExtracted = 0;
@@ -768,7 +811,8 @@ async function executeRun(id: string, userId: string) {
         robotMetaId: plainRun.robotMetaId,
         robotName: recording.recording_meta.name,
         status: 'success',
-        finishedAt: new Date().toLocaleString()
+        finishedAt,
+        hasChanges,
       };
 
       serverIo.of(plainRun.browserId).emit('run-completed', completionData);

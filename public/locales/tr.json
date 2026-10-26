@@ -115,6 +115,7 @@
     "server_url_helper": "Tüm robotlar için kullanılacak proxy. HTTP ve SOCKS desteklenir. Örnek http://myproxy.com:3128 veya socks5://myproxy.com:3128. Kısa biçim myproxy.com:3128 HTTP proxy kabul edilir.",
     "requires_auth": "Kimlik Doğrulama Gerekli mi?",
     "username": "Kullanıcı Adı",
+    "username_hint": "İsteğe bağlı: Sağlayıcınızın oturum kimliği beklediği yere {session} ekleyin (ör. user-session-{session}); böylece her çalıştırmada yeni bir sabit IP alırsınız.",
     "password": "Şifre",
     "add_proxy": "Proxy Ekle",
     "test_proxy": "Proxy’yi Test Et",
@@ -466,7 +467,7 @@
     "robot_limit": "Robot Limiti",
     "created_by_user": "Oluşturan",
     "created_at": "Oluşturulma",
-    "compare_runs": "Compare most recent run to previous run",
+    "compare_runs": "Enable Monitoring",
     "errors": {
       "robot_not_found": "Robot bulunamadı. Tekrar deneyin."
     },
@@ -652,6 +653,7 @@
     "de": "Almanca",
     "tr": "Türkçe",
     "ko": "Korece",
-    "he": "İbranice"
+    "he": "İbranice",
+    "az": "Azerbaycanca"
   }
 }

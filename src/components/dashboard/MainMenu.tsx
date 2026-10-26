@@ -3,8 +3,14 @@ import Tabs from '@mui/material/Tabs';
 import Tab from '@mui/material/Tab';
 import Box from '@mui/material/Box';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Paper, Button, useTheme, Modal, Typography, Stack, Divider, Dialog, DialogContent, DialogTitle } from "@mui/material";
-import { AutoAwesome, VpnKey, Usb, CloudQueue, Description, Favorite, SlowMotionVideo, PlayArrow, ArrowForwardIos, Star, Terminal } from "@mui/icons-material";
+import {
+  Paper, Button, useTheme, Typography, Stack, Divider,
+  Dialog, DialogContent
+} from "@mui/material";
+import {
+  AutoAwesome, VpnKey, Usb, CloudQueue, Description, Favorite, SlowMotionVideo,
+  PlayArrow, ArrowForwardIos, Star, CloseFullscreen
+} from "@mui/icons-material";
 import { useTranslation } from 'react-i18next';
 
 interface MainMenuProps {
@@ -18,7 +24,6 @@ export const MainMenu = ({ value = 'robots', handleChangeContent }: MainMenuProp
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [sponsorModalOpen, setSponsorModalOpen] = useState(false);
   const [docModalOpen, setDocModalOpen] = useState(false);
   const [starCount, setStarCount] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -73,18 +78,20 @@ export const MainMenu = ({ value = 'robots', handleChangeContent }: MainMenuProp
     textAlign: 'left',
     fontSize: '15px',
     letterSpacing: '0.02857em',
-    padding: '20px 20px 0px 22px',
-    minHeight: '60px',
+    padding: '0px 20px 0px 22px',
+    minHeight: '53px',
     minWidth: '100%',
     display: 'flex',
     alignItems: 'center',
     textTransform: 'none',
     color: theme.palette.mode === 'light' ? '#6C6C6C' : 'inherit',
+
     '&:hover': {
       color: theme.palette.mode === 'light' ? '#6C6C6C' : 'inherit',
       backgroundColor: theme.palette.mode === 'light' ? '#f5f5f5' : 'inherit',
     },
-    "& .MuiButton-startIcon .MuiSvgIcon-root": {
+
+    '& .MuiButton-startIcon .MuiSvgIcon-root': {
       fontSize: 17.5,
     },
   };
@@ -143,6 +150,9 @@ export const MainMenu = ({ value = 'robots', handleChangeContent }: MainMenuProp
                 justifyContent: "flex-start",
                 textAlign: "left",
                 fontSize: 15,
+                minHeight: 50,
+                paddingTop: -3,
+                paddingBottom: -3,
               },
               "& .MuiTab-iconWrapper, & .MuiTab-icon": {
                 fontSize: 20,
@@ -154,27 +164,22 @@ export const MainMenu = ({ value = 'robots', handleChangeContent }: MainMenuProp
               label={t('mainmenu.recordings')}
               icon={<AutoAwesome />}
               iconPosition="start"
-              disableRipple={true}
-              sx={{ justifyContent: 'flex-start', textAlign: 'left', fontSize: '15px' }}
               onClick={handleRobotsClick} />
             <Tab value="runs"
               label={t('mainmenu.runs')}
               icon={<PlayArrow />}
               iconPosition="start"
-              disableRipple={true}
-              sx={{ justifyContent: 'flex-start', textAlign: 'left', fontSize: '15px' }} />
+            />
             <Tab value="proxy"
               label={t('mainmenu.proxy')}
               icon={<Usb />}
               iconPosition="start"
-              disableRipple={true}
-              sx={{ justifyContent: 'flex-start', textAlign: 'left', fontSize: '15px' }} />
+            />
             <Tab value="apikey"
               label={t('mainmenu.apikey')}
               icon={<VpnKey />}
               iconPosition="start"
-              disableRipple={true}
-              sx={{ justifyContent: 'flex-start', textAlign: 'left', fontSize: '15px' }} />
+            />
           </Tabs>
           <Divider sx={{ borderColor: theme.palette.mode === 'dark' ? "#080808ff" : "" }} />
           <Box sx={{ display: 'flex', flexDirection: 'column', textAlign: 'left' }}>
@@ -238,13 +243,14 @@ export const MainMenu = ({ value = 'robots', handleChangeContent }: MainMenuProp
               SDK
             </Button>
             <Button
-              href='https://docs.maxun.dev/category/cli'
+              href='https://docs.maxun.dev/category/mcp'
               target="_blank"
               rel="noopener noreferrer"
-              sx={buttonStyles} startIcon={<Terminal />}>
-              CLI
+              sx={buttonStyles} startIcon={<CloseFullscreen />}>
+              MCP
             </Button>
-            <Button onClick={() => setSponsorModalOpen(true)} sx={buttonStyles} startIcon={<Favorite />}>
+            <Button href='https://github.com/sponsors/amhsirak' target="_blank"
+              rel="noopener noreferrer" sx={buttonStyles} startIcon={<Favorite />}>
               Sponsor Us
             </Button>
           </Box>
@@ -293,44 +299,6 @@ export const MainMenu = ({ value = 'robots', handleChangeContent }: MainMenuProp
           </Box>
         </Button>
       </Paper>
-
-      <Dialog
-        open={sponsorModalOpen}
-        onClose={() => setSponsorModalOpen(false)}
-        maxWidth="sm"
-        fullWidth
-        PaperProps={{
-          sx: {
-            borderRadius: 2,
-            width: 600
-          }
-        }}
-      >
-        <DialogTitle>
-          Support Maxun Open Source
-        </DialogTitle>
-
-        <DialogContent sx={{ pt: 2 }}>
-          <Typography variant="body1" gutterBottom>
-            Maxun is built by a small, full-time team. Your donations directly
-            contribute to making it better.
-            <br />
-            Thank you for your support! 🩷
-          </Typography>
-
-          <Stack direction="row" spacing={2} mt={4}>
-            <Button
-              href="https://github.com/sponsors/amhsirak"
-              target="_blank"
-              rel="noopener noreferrer"
-              variant="outlined"
-              fullWidth
-            >
-              Sponsor Maxun on GitHub Sponsors
-            </Button>
-          </Stack>
-        </DialogContent>
-      </Dialog>
     </>
   );
 };

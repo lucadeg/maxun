@@ -115,6 +115,7 @@
         "server_url_helper": "すべてのロボットで使用するプロキシ。HTTPとSOCKSプロキシがサポートされています。例：http://myproxy.com:3128 または socks5://myproxy.com:3128。短縮形 myproxy.com:3128 はHTTPプロキシとして扱われます。",
         "requires_auth": "認証が必要ですか？",
         "username": "ユーザー名",
+        "username_hint": "任意: プロバイダーがセッションIDを要求する位置に {session} を入れると（例: user-session-{session}）、実行ごとに新しいスティッキーIPが割り当てられます。",
         "password": "パスワード",
         "add_proxy": "プロキシを追加",
         "test_proxy": "プロキシをテスト",
@@ -466,7 +467,7 @@
         "robot_limit": "ロボットの制限",
         "created_by_user": "作成したユーザー",
         "created_at": "作成日時",
-        "compare_runs": "Compare most recent run to previous run",
+        "compare_runs": "Enable Monitoring",
         "errors": {
             "robot_not_found": "ロボットの詳細が見つかりませんでした。もう一度試してください。"
         },
@@ -652,6 +653,7 @@
         "de": "ドイツ語",
         "tr": "トルコ語",
         "ko": "韓国語",
-        "he": "ヘブライ語"
+        "he": "ヘブライ語",
+        "az": "アゼルバイジャン語"
     }
 }

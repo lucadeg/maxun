@@ -1012,27 +1012,34 @@ export const RobotEditPage = ({ handleStart }: RobotSettingsProps) => {
           style={{ marginBottom: "20px" }}
         />
 
-        {renderLlmConfigFields()}
-
         <Button
           onClick={() => setShowCrawlAdvanced(!showCrawlAdvanced)}
           sx={{
-            mb: 2,
+            color: theme => theme.palette.mode === 'dark' ? 'inherit' : theme.palette.common.black,
             textTransform: 'none',
-            color: '#ff00c3'
+            alignSelf: 'flex-start',
+            '&:hover': {
+              background: 'inherit',
+              color: 'inherit',
+            },
           }}
         >
-          {showCrawlAdvanced ? 'Hide Advanced Options' : 'Advanced Options'}
+          {showCrawlAdvanced ? 'Hide Crawl Settings' : 'Crawl Settings'}
         </Button>
 
         <Collapse in={showCrawlAdvanced}>
-          <Box sx={{ mb: 2 }}>
+          <Box sx={{ mt: 4, mb: 2 }}>
             <FormControl fullWidth sx={{ mb: 2 }}>
               <InputLabel>Crawl Scope</InputLabel>
               <Select
                 value={crawlConfig.mode || 'domain'}
                 label="Crawl Scope"
-                onChange={(e) => setCrawlConfig((prev) => ({ ...prev, mode: e.target.value }))}
+                onChange={(e) =>
+                  setCrawlConfig((prev) => ({
+                    ...prev,
+                    mode: e.target.value,
+                  }))
+                }
               >
                 <MenuItem value="domain">Same Domain Only</MenuItem>
                 <MenuItem value="subdomain">Include Subdomains</MenuItem>
@@ -1113,6 +1120,8 @@ export const RobotEditPage = ({ handleStart }: RobotSettingsProps) => {
             </Box>
           </Box>
         </Collapse>
+
+        {renderLlmConfigFields()}
       </>
     );
   };
@@ -1206,12 +1215,36 @@ export const RobotEditPage = ({ handleStart }: RobotSettingsProps) => {
           <Select
             value={searchConfig.filters?.timeRange || ''}
             label="Time Range"
-            onChange={(e) => setSearchConfig((prev) => ({
-              ...prev,
-              filters: { ...prev.filters, timeRange: e.target.value as '' | 'day' | 'week' | 'month' | 'year' || undefined }
-            }))}
+            displayEmpty
+            renderValue={(value) => {
+              if (!value) {
+                return 'All Time';
+              }
+              const timeRange = value as 'day' | 'week' | 'month' | 'year';
+              return {
+                day: 'Past 24 Hours',
+                week: 'Past Week',
+                month: 'Past Month',
+                year: 'Past Year',
+              }[timeRange];
+            }}
+            onChange={(e) =>
+              setSearchConfig((prev) => ({
+                ...prev,
+                filters: {
+                  ...prev.filters,
+                  timeRange: e.target.value as
+                    | ''
+                    | 'day'
+                    | 'week'
+                    | 'month'
+                    | 'year'
+                    | undefined,
+                },
+              }))
+            }
           >
-            <MenuItem value="">No Filter</MenuItem>
+            <MenuItem value="">All Time</MenuItem>
             <MenuItem value="day">Past 24 Hours</MenuItem>
             <MenuItem value="week">Past Week</MenuItem>
             <MenuItem value="month">Past Month</MenuItem>
@@ -1478,7 +1511,8 @@ export const RobotEditPage = ({ handleStart }: RobotSettingsProps) => {
     const targetUrlValue = getTargetUrl();
     const robotType = robot.recording_meta.type;
     const hasEditableTargetUrl = !robot.recording_meta.type?.includes("prebuilt") &&
-      robotType !== 'search' && robotType !== 'doc-extract' && robotType !== 'doc-parse';
+      robotType !== 'search' && robotType !== 'doc-extract' && robotType !== 'doc-parse' &&
+      robot.recording_meta.isLLM !== true;
     if (hasEditableTargetUrl && targetUrlValue && !isNavigableUrl(normalizeUrl(targetUrlValue))) {
       notify("error", t("robot_edit.notifications.invalid_url", "Please enter a valid website URL (e.g. https://example.com)"));
       return;
@@ -1631,6 +1665,10 @@ export const RobotEditPage = ({ handleStart }: RobotSettingsProps) => {
     navigate(basePath);
   };
 
+  // AI mode / Agent robots: target URL, list limits and actions are hidden here
+  // (UI only; the values stay on the robot and are saved unchanged).
+  const isAgentRobot = robot?.recording_meta?.isLLM === true;
+
   return (
     <RobotConfigPage
       title={t("robot_edit.title")}
@@ -1654,7 +1692,7 @@ export const RobotEditPage = ({ handleStart }: RobotSettingsProps) => {
                 style={{ marginBottom: "20px" }}
               />
 
-              {!['search', 'doc-parse', 'doc-extract'].includes(robot.recording_meta.type || '') && (
+              {!['search', 'doc-parse', 'doc-extract'].includes(robot.recording_meta.type || '') && !isAgentRobot && (
                 <TextField
                   label={t("robot_duplication.fields.target_url")}
                   key={t("robot_duplication.fields.target_url")}
@@ -1664,13 +1702,13 @@ export const RobotEditPage = ({ handleStart }: RobotSettingsProps) => {
                   style={{ marginBottom: "20px" }}
                 />
               )}
-              
+
               {renderCrawlConfigFields()}
               {renderSearchConfigFields()}
               {renderScrapeOutputFormatsField()}
 
-              {renderScrapeListLimitFields()}
-              {renderActionNameFields()}
+              {!isAgentRobot && renderScrapeListLimitFields()}
+              {!isAgentRobot && renderActionNameFields()}
               {renderAllCredentialFields()}
               {robot?.recording_meta?.type !== 'crawl' && robot?.recording_meta?.type !== 'search' && renderLlmConfigFields()}
               {renderDocumentFileSection()}

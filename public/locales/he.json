@@ -115,6 +115,7 @@
       "server_url_helper": "פרוקסי שישמש עבור כל הרובוטים. HTTP ו-SOCKS נתמכים. לדוגמה http://myproxy.com:3128 או socks5://myproxy.com:3128. הצורה הקצרה myproxy.com:3128 נחשבת לפרוקסי HTTP.",
       "requires_auth": "האם נדרש אימות?",
       "username": "שם משתמש",
+      "username_hint": "אופציונלי: הוסיפו {session} במקום שבו הספק מצפה למזהה סשן (לדוגמה user-session-{session}) כדי לקבל IP קבוע חדש בכל הרצה.",
       "password": "סיסמה",
       "add_proxy": "הוסף פרוקסי",
       "test_proxy": "בדוק פרוקסי",
@@ -465,7 +466,7 @@
       "robot_limit": "מגבלת רובוט",
       "created_by_user": "נוצר על ידי משתמש",
       "created_at": "הרובוט נוצר ב-",
-      "compare_runs": "Compare most recent run to previous run",
+      "compare_runs": "Enable Monitoring",
       "errors": {
         "robot_not_found": "לא ניתן היה למצוא את פרטי הרובוט. אנא נסה שוב."
       },
@@ -651,6 +652,7 @@
       "de": "גרמנית",
       "tr": "טורקית",
       "ko": "קוריאנית",
-      "he": "עברית"
+      "he": "עברית",
+      "az": "אזרבייג'נית"
     }
 }
